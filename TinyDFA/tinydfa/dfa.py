@@ -136,7 +136,7 @@ class DFA(nn.Module):
             self.output_size = int(np.prod(remove_indices(input.shape, self.batch_dims)))
 
             for layer in self.dfa_layers:
-                print(layer.feedback_shape)
+                print(f'layer.feedback_shape: {layer.feedback_shape}')
                 feedback_size = int(np.prod(remove_indices(layer.feedback_shape, layer.batch_dims)))
                 if feedback_size > self.max_feedback_size:
                     self.max_feedback_size = feedback_size

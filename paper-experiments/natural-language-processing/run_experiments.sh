@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# Replicate Table 5
 # this script will run all the reported experiments at once in separate tmux sessions if you have 10 GPUs
 # you might want to select only a few of them
 # on a V100, an epoch will take around 45 min for BP and 55 min for DFA

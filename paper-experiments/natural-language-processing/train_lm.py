@@ -4,6 +4,7 @@ Author: François Boniface
 """
 
 import argparse
+import json
 import math
 import numpy as np
 import os
@@ -60,10 +61,19 @@ parser.add_argument("--schedule_patience", type=int, default=1)
 parser.add_argument("--schedule_factor", type=int, default=0.2)
 
 parser.add_argument("--dataset", type=str, default='wikitext103', choices=['wikitext2', 'wikitext103'])
-parser.add_argument("--bpe_path", type=str, default='bpe_models/wikitext-2.bpe.32000')
+parser.add_argument("--bpe_path", type=str, default='bpe_models/wikitext-103.bpe.32000')
 
-parser.add_argument("--savedir", help="relative path of saving directory", type=str, default='experiments')
+parser.add_argument("--savedir", help="relative path of saving directory", type=str, default='[PT_OUTPUT_DIR]')
 args = parser.parse_args()
+
+args.savedir = args.savedir.replace(
+        '[PT_OUTPUT_DIR]', os.getenv('PT_OUTPUT_DIR', 'tmp'))
+os.makedirs(args.savedir, exist_ok=True)
+print(args)
+# dump args to args.json
+with open(os.path.join(args.savedir, 'args.json'), 'w') as f:
+    json.dump(vars(args), f, indent=4, sort_keys=True)
+
 print(args)
 
 if args.attention == 'fixed' and args.nheads != 4:
@@ -98,6 +108,7 @@ vocab_size = len(TEXT.vocab.stoi)
 print(f"Unique tokens in vocabulary: {len(TEXT.vocab)}")
 
 device = torch.device(f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu")
+print(f'device={device}')
 
 train_data = utils.batchify(train_txt, TEXT, args.batch_size, device)
 val_data = utils.batchify(val_txt, TEXT, args.batch_size, device)
@@ -192,13 +203,13 @@ for epoch in range(1, args.max_epochs + 1):
         'valid_losses': val_losses,
         'mean_epoch_duration': np.mean(durations)
     }
-    with open(os.path.join(exp_dir, f'stats.pkl'), 'wb') as f:
+    with open(os.path.join(exp_dir, f'stats_epoch_{epoch}.pkl'), 'wb') as f:
         pickle.dump(stats, f)
 
     if alignment:
-        with open(os.path.join(exp_dir, f'alignments.pkl'), 'wb') as f:
+        with open(os.path.join(exp_dir, f'alignments_epoch_{epoch}.pkl'), 'wb') as f:
             pickle.dump(alignments, f)
 
     if epochs_wo_improvement == args.patience:
-        print('Early stopping')
+        print(f'Early stopping @ epoch {epoch}')
         break
