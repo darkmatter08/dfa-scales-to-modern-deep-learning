@@ -1,0 +1,54 @@
+description: dfa-scales-table5
+
+target:
+  cluster: rr1
+  vc: resrchvc
+  # cluster: eu1
+  # vc: msrlabs
+environment:
+  image: pytorch/pytorch:1.5-cuda10.1-cudnn7-devel
+
+storage:
+  shawn:
+    storage_account_name: hpalangivm0
+    container_name: shawn
+    local_dir: /data/home/jains/shawn
+
+code:
+  local_dir: /data/home/jains/Documents/dfa-scales-to-modern-deep-learning
+
+search:
+  job_template:
+    name: dfa_scales_table5__experiment_{experiment}
+    sku: G1
+    sku_count: 1
+    command:
+    - echo {experiment} $EXTRA_ARGS
+    - pip install --user -r requirements.txt
+    - pip install --user -r requirements2.txt
+    - cd TinyDFA; pip install .; cd ..
+    - pip freeze > img_pip_freeze.txt
+    # Hack to get fairseq-* CLI tools on PATH, may be caused by --user install?
+    - export PATH=$$PATH:/root/.local/bin:/home/jains/.local/bin
+    - cd paper-experiments/natural-language-processing/
+    - python train_lm.py {experiment} --max_epochs 20 $EXTRA_ARGS
+    submit_args:
+      container_args:
+        shm_size: 128G
+  type: grid
+  max_trials: 256
+  params:
+    - name: experiment
+      spec: discrete
+      values: [
+        '--gpu_id 0 --beta2 0.98',
+        '--gpu_id 0 --beta2 0.999',
+        '--gpu_id 0 --dfa simple --beta2 0.98',
+        '--gpu_id 0 --dfa full --beta2 0.98',
+        '--gpu_id 0 --dfa simple --optim adam --init_lr 5e-5 --beta2 0.98',
+        '--gpu_id 0 --dfa full --optim adam --init_lr 5e-5 --beta2 0.98',
+        '--gpu_id 0 --dfa simple --optim adam --init_lr 5e-5 --beta2 0.999',
+        '--gpu_id 0 --dfa full --optim adam --init_lr 5e-5 --beta2 0.999',
+        '--gpu_id 0 --dfa simple --optim schedule --init_lr 1e-4 --beta2 0.999',
+        '--gpu_id 0 --dfa full --optim schedule --init_lr 1e-4 --beta2 0.999',
+      ]

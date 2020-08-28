@@ -101,56 +101,80 @@ class ResNetBottleNeckBlock(ResNetResidualBlock):
 
 
 class ResNetLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, block=ResNetBasicBlock, n=1, *args, **kwargs):
+    def __init__(self, in_channels, out_channels, block=ResNetBasicBlock, n=1, layer_dfas=None, *args, **kwargs):
         super().__init__()
         # 'We perform downsampling directly by convolutional layers that have a stride of 2.'
         downsampling = 2 if in_channels != out_channels else 1
         
+        # Compose the blocks into a chain.
+        # 'ResNet{,Basic,BottleNeck}Block' means a single ResNet block (Figure 2, https://arxiv.org/pdf/1512.03385.pdf).
+        # 'ResNetLayer' means a block group, i.e. conv2_x, conv3_x, conv4_x (Table 1, https://arxiv.org/pdf/1512.03385.pdf).
+        # For DFA, we want to wrap each block with DFA.
+        # We have to undo the nn.Sequential and instead manually chain the blocks together
+        # optionally inserting a DFALayer call (not DFA?) between blocks.
+
+        # self.blocks NOT USED in forward. Only used by ResNet `self.decoder = ResnetDecoder(self.encoder.blocks[-1].blocks[-1].expanded_channels, n_classes)`
         self.blocks = nn.Sequential(
             block(in_channels , out_channels, *args, **kwargs, downsampling=downsampling),
             *[block(out_channels * block.expansion, 
                     out_channels, downsampling=1, *args, **kwargs) for _ in range(n - 1)]
         )
+        self.blocks_in_order = nn.ModuleList([
+            block(in_channels, out_channels, *args, **kwargs, downsampling=downsampling),
+            *[block(out_channels * block.expansion, out_channels, downsampling=1, *args, **kwargs) for _ in range(n - 1)]
+        ])
+        self.layer_dfas = layer_dfas
 
     def forward(self, x):
-        x = self.blocks(x)
+        # x = self.blocks(x)
+        for idx, block in enumerate(self.blocks_in_order):
+            x = block(x)
+            if self.layer_dfas:
+                # print('in ResNetLayer applying DFAs. Should not happen in DFA (group) mode. Should only happen in BLOCK mode')
+                x = self.layer_dfas[idx](x)
         return x
 
 class ResNetEncoder(nn.Module):
     """
     ResNet encoder composed by increasing different layers with increasing features.
+    Defaults seem to be setup for the 18-layer ResNet (Table 1, https://arxiv.org/pdf/1512.03385.pdf)
     """
-    def __init__(self, in_channels=3, blocks_sizes=[64, 128, 256, 512], deepths=[2,2,2,2], 
-                 activation=nn.ReLU, block=ResNetBasicBlock, dfas=None, *args, **kwargs):
+    def __init__(self, in_channels=3, blocks_sizes=[64, 128, 256, 512], depths=[2,2,2,2], 
+                 activation=nn.ReLU, block=ResNetBasicBlock, dfas=None, layer_dfas=None, *args, **kwargs):
         super().__init__()
-        
+
         self.blocks_sizes = blocks_sizes
-        
+
         self.gate = nn.Sequential(
             nn.Conv2d(in_channels, self.blocks_sizes[0], kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(self.blocks_sizes[0]),
             activation(),
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        )
-        
+        ) # conv1
+
         self.in_out_block_sizes = list(zip(blocks_sizes, blocks_sizes[1:]))
-        self.blocks = nn.ModuleList([ 
-            ResNetLayer(blocks_sizes[0], blocks_sizes[0], n=deepths[0], activation=activation, 
-                        block=block,  *args, **kwargs),
+
+        # need to pass the appropriate layer_dfas. can't just pass all of them!
+        if layer_dfas is None:
+            layer_dfas = [None for _ in range(len(depths))]
+        self.blocks = nn.ModuleList([
+            ResNetLayer(blocks_sizes[0], blocks_sizes[0], n=depths[0], activation=activation, 
+                        block=block, layer_dfas=layer_dfas[0], *args, **kwargs),  # for conv2_x
             *[ResNetLayer(in_channels * block.expansion, 
                           out_channels, n=n, activation=activation, 
-                          block=block, *args, **kwargs) 
-              for (in_channels, out_channels), n in zip(self.in_out_block_sizes, deepths[1:])]       
+                          block=block, layer_dfas=dfas, *args, **kwargs)
+              for (in_channels, out_channels), n, dfas in zip(self.in_out_block_sizes, depths[1:], layer_dfas[1:])]  # for conv3_x, conv4_x, conv5_x
         ])
 
         self.dfas = dfas
         # import pdb; pdb.set_trace()
-        
+
     def forward(self, x):
         x = self.gate(x)
         for index, block in enumerate(self.blocks):
             x = block(x)
             if self.dfas:
+                # print('in ResNetEncoder applying DFAs. Should not happen in BLOCK mode. Should only occur in DFA mode.')
                 x = self.dfas[index](x)
         return x
 
@@ -177,15 +201,30 @@ class ResNet(nn.Module):
         self.training_method = None
         if 'training_method' in kwargs:
             self.training_method = kwargs['training_method']
-        self.use_dfa = self.training_method in ['DFA', 'SHALLOW']
+        self.use_dfa = self.training_method in ['DFA', 'SHALLOW', 'BLOCK']
         if self.use_dfa:
-            dfas = [DFALayer() for _ in range(len(kwargs['deepths']))]  # should I grab these from the EncoderLayers instead?
-            self.dfa = DFA(dfas, feedback_points_handling=FeedbackPointsHandling.LAST,
+            all_dfas = None
+            if self.training_method == 'DFA':  # Groups of Layers DFA
+                all_dfas = dfas = [DFALayer() for _ in range(len(kwargs['depths']))]  # should I grab these from the EncoderLayers instead?
+                layer_dfas = None
+            elif self.training_method == 'BLOCK':
+                dfas = None
+                layer_dfas = [[DFALayer() for _ in range(number_of_blocks)] for number_of_blocks in kwargs['depths']]
+                assert len(layer_dfas) == len(kwargs['depths'])
+                # flat version of layer_dfas
+                total_number_of_blocks = sum(kwargs['depths'])
+                print(f'total_number_of_blocks={total_number_of_blocks}')
+                all_dfas = [item for sublist in layer_dfas for item in sublist]
+                assert len(all_dfas) == total_number_of_blocks
+            elif self.training_method == 'SHALLOW':
+                raise NotImplementedError('SHALLOW DFA not implemented')
+            self.dfa = DFA(all_dfas, feedback_points_handling=FeedbackPointsHandling.LAST,
                            no_training=(self.training_method == 'SHALLOW'))
         else:
             dfas = None
+            layer_dfas = None
 
-        self.encoder = ResNetEncoder(in_channels, dfas=dfas, *args, **kwargs)
+        self.encoder = ResNetEncoder(in_channels, dfas=dfas, layer_dfas=layer_dfas, * args, **kwargs)
         self.decoder = ResnetDecoder(self.encoder.blocks[-1].blocks[-1].expanded_channels, n_classes)
         
     def forward(self, x):
@@ -197,19 +236,19 @@ class ResNet(nn.Module):
 
 
 def resnet18(in_channels, n_classes, **kwargs):
-    return ResNet(in_channels, n_classes, block=ResNetBasicBlock, deepths=[2, 2, 2, 2], **kwargs)
+    return ResNet(in_channels, n_classes, block=ResNetBasicBlock, depths=[2, 2, 2, 2], **kwargs)
 
 def resnet34(in_channels, n_classes, **kwargs):
-    return ResNet(in_channels, n_classes, block=ResNetBasicBlock, deepths=[3, 4, 6, 3], **kwargs)
+    return ResNet(in_channels, n_classes, block=ResNetBasicBlock, depths=[3, 4, 6, 3], **kwargs)
 
 def resnet50(in_channels, n_classes, **kwargs):
-    return ResNet(in_channels, n_classes, block=ResNetBottleNeckBlock, deepths=[3, 4, 6, 3], **kwargs)
+    return ResNet(in_channels, n_classes, block=ResNetBottleNeckBlock, depths=[3, 4, 6, 3], **kwargs)
 
 def resnet101(in_channels, n_classes, **kwargs):
-    return ResNet(in_channels, n_classes, block=ResNetBottleNeckBlock, deepths=[3, 4, 23, 3], **kwargs)
+    return ResNet(in_channels, n_classes, block=ResNetBottleNeckBlock, depths=[3, 4, 23, 3], **kwargs)
 
 def resnet152(in_channels, n_classes, **kwargs):
-    return ResNet(in_channels, n_classes, block=ResNetBottleNeckBlock, deepths=[3, 8, 36, 3], **kwargs)
+    return ResNet(in_channels, n_classes, block=ResNetBottleNeckBlock, depths=[3, 8, 36, 3], **kwargs)
 
 
 def train(args, train_loader, model, optimizer, device, epoch, writer):
@@ -343,9 +382,9 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Tiny-DFA MNIST Example')
-    parser.add_argument('-t', '--training-method', type=str, choices=['BP', 'DFA', 'SHALLOW'], default='DFA',
+    parser.add_argument('-t', '--training-method', type=str, choices=['BP', 'DFA', 'SHALLOW', 'BLOCK'], default='DFA',
                         metavar='T', help='training method to use, choose from backpropagation (BP), direct feedback '
-                                          'alignment (DFA), or only topmost layer (SHALLOW) (default: DFA)')
+                                          'alignment after each group of blocks (DFA), only topmost layer (SHALLOW), or after every ResNet block (BLOCK) (default: DFA)')
 
     parser.add_argument('-b', '--batch-size', type=int, default=128, metavar='B',
                         help='training batch size (default: 128)')
